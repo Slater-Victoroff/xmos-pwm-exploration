@@ -1,53 +1,57 @@
-// Copyright (c) 2011, XMOS Ltd, All rights reserved
-// This software is freely distributable under a derivative of the
-// University of Illinois/NCSA Open Source License posted in
-// LICENSE.txt and at <http://github.xcore.com/>
-
 #include <xs1.h>
-#include "pwm_singlebit_port.h"
+#include <stdio.h>
+#include "SpdifReceive.h"
+#include "SpdifTransmit.h"
 
-// use XTAG2 pins 3 and 5 and 7 as 1b wide outputs with a 32b buffer
-out buffered port:32 rgPorts[] = {XS1_PORT_1L, XS1_PORT_1A, XS1_PORT_1C}; 
+#define LOCAL_CLOCK_INCREMENT 166667
 
-clock clk = XS1_CLKBLK_1;
+buffered in port:4 inputPort = XS1_PORT_1C;
+in port masterClockPort = XS1_PORT_1D;
+buffered out port:32 outputPort = XS1_PORT_1L;
+out port p_pll_clk = XS1_PORT_4E;
+out port p_aud_cfg = XS1_PORT_4A;
 
-#define RESOLUTION 1024
-#define PERIOD RESOLUTION*2*TIMESTEP
-#define PERIOD_NS PERIOD*10
-#define NUM_PORTS 3
-#define TIMESTEP 100
+clock clockblock = XS1_CLKBLK_1;
 
-void updateValues(unsigned int values[]) {
-	for (unsigned int i = 0; i < NUM_PORTS; ++i) {
-		// increment values[0] by 1, values[1] by 2, modulo the resolution
-		values[i] = (values[i]+i+1) % RESOLUTION;
-	}
-}
-
-void client(chanend c) {
-    timer t;
-    int time;
-
-    unsigned int values[NUM_PORTS] = {0, 0};
-
-    t :> time;
-    time += PERIOD;
-
-    while (1) {
-        t when timerafter (time) :> void;
-        updateValues(values);
-        pwmSingleBitPortSetDutyCycle(c, values, NUM_PORTS);
-        time += PERIOD;
+void handleSamples(streaming chanend enteringChannel, chanend exitingChannel) {
+    int v, left, right;
+    while(1) {
+        enteringChannel :> v;
+        if((v & 0xF) == FRAME_Y) {
+            right = (v & ~0xf) << 4;
+            exitingChannel <: right;
+        } else {
+            left = (v & ~0xf) << 4;
+            exitingChannel <: left;
+        }
     }
 }
 
-int main() {
-    chan c;
+void clockGen() {
+   unsigned pinVal = 0;
+   timer t;
+   unsigned time;
+   t :> time;
+   p_aud_cfg <: 0;
+   p_pll_clk <: pinVal;
 
+   while(1) {
+      t when timerafter(time) :> void;
+      pinVal = !pinVal;
+      p_pll_clk <: pinVal;
+      time += LOCAL_CLOCK_INCREMENT;
+   }
+}
+
+int main(void) {
+    streaming chan enteringChannel;
+    chan exitingChannel;
+    SpdifTransmitPortConfig(outputPort, clockblock, masterClockPort);
     par {
-        client(c);
-        pwmSingleBitPort(c, clk, rgPorts, NUM_PORTS, RESOLUTION, TIMESTEP, 1);
+        clockGen();
+        SpdifReceive(inputPort, enteringChannel, 1, clockblock);
+        handleSamples(enteringChannel, exitingChannel);
+        SpdifTransmit(outputPort, exitingChannel);
     }
     return 0;
 }
-
